@@ -174,7 +174,7 @@ fn main() {
         let r3: usize = instr as usize >> 11 & 0b11111;
         let r4: usize = instr as usize >> 6 & 0b11111;
         let last_value = if is_imm { imm } else { registers[r3] };
-        let mut full_instr;
+        let full_instr;
         // dbg!(instr, is_alu, is_imm, opcode, imm, r1, r2, r3, r4, last_value);
         if is_alu {
             let instr = AluInstruction::try_from(opcode as i32).unwrap();
@@ -195,19 +195,19 @@ fn main() {
                     registers[r1] = registers[r2] & last_value;
                 },
                 AluInstruction::Shl => {
-                    cout = (registers[r2] & (1 << 31));
+                    cout = registers[r2] & (1 << 31);
                     registers[r1] = registers[r2] << 1;
                 },
                 AluInstruction::Shr => {
-                    cout = (registers[r2] & 1);
+                    cout = registers[r2] & 1;
                     registers[r1] = registers[r2] >> 1;
                 },
                 AluInstruction::Rotl => {
-                    cout = (registers[r2] & (1 << 31));
+                    cout = registers[r2] & (1 << 31);
                     registers[r1] = registers[r2].rotate_left(1);
                 },
                 AluInstruction::Rotr => {
-                    cout = (registers[r2] & 1);
+                    cout = registers[r2] & 1;
                     registers[r1] = registers[r2].rotate_right(1);
                 },
                 AluInstruction::Add => {
@@ -240,7 +240,7 @@ fn main() {
             }
             let is_zero = registers[r1] == 0;
             let sign = registers[r1] & (1 << 31) != 0;
-            registers.flags = 0| (cout << 3) | (is_zero as u32) | ((sign as u32)<<4);
+            registers.flags = (cout << 3) | (is_zero as u32) | ((sign as u32)<<4);
         } else {
             let instr = CoreInstruction::try_from(opcode as i32).unwrap();
             full_instr = Instruction::Core(instr);
