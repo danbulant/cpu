@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+
+femtovg = "0.9.1"
+glutin = "0.32.0"
+raw-window-handle = "0.5.0"
+winit = {  version = "0.30.3" }
+glutin-winit = "0.5.0"
+softbuffer = "0.4.4"
