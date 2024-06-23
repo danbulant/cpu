@@ -7,7 +7,6 @@ use std::io::Read;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::thread;
-use std::time::Instant;
 
 use signal_hook::consts::SIGINT;
 use signal_hook::iterator::Signals;
@@ -31,17 +30,6 @@ macro_rules! back_to_enum {
             $($(#[$vmeta])* $vname $(= $val)?,)*
         }
 
-        // impl std::convert::TryFrom<i32> for $name {
-        //     type Error = ();
-        // 
-        //     fn try_from(v: i32) -> Result<Self, Self::Error> {
-        //         match v {
-        //             $(x if x == $name::$vname as i32 => Ok($name::$vname),)*
-        //             _ => Err(()),
-        //         }
-        //     }
-        // }
-
         impl std::convert::From<u8> for $name {
             fn from(v: u8) -> Self {
                 match v {
@@ -53,23 +41,31 @@ macro_rules! back_to_enum {
     }
 }
 
-back_to_enum! {
-    #[repr(u8)]
-    #[derive(Debug, Copy, Clone)]
-    enum AluInstruction {
-        Not,
-        Xor,
-        Or,
-        And,
-        Shl,
-        Shr,
-        Rotl,
-        Rotr,
-        Add,
-        Sub,
-        Inc,
-        Dec,
-        Mul,
+#[repr(u8)]
+#[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
+enum AluInstruction {
+    Not,
+    Xor,
+    Or,
+    And,
+    Shl,
+    Shr,
+    Rotl,
+    Rotr,
+    Add,
+    Sub,
+    Inc,
+    Dec,
+    Mul,
+}
+
+impl From<u8> for AluInstruction {
+    fn from(value: u8) -> Self {
+        if value > AluInstruction::Mul as u8 {
+            panic!("Invalid instruction");
+        }
+        unsafe { std::mem::transmute(value) }
     }
 }
 
@@ -129,9 +125,8 @@ impl std::ops::IndexMut<usize> for Registers {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         match index {
             0 => &mut self.scratch,
-            0b11110 => &mut self.scratch,
-            0b11111 => &mut self.scratch,
-            index => &mut self.regs[index - 1]
+            index => &mut self.regs[index - 1],
+            x if x & 0b10000 != 0 => &mut self.scratch,
         }
     }
 }
@@ -231,6 +226,7 @@ fn main() {
         i += 1;
     }
     
+    let now = std::time::Instant::now();
     let instrcount = UnsafeCell::from(0u64);
     let instrcountreadptr = instrcount.get();
     let instrcountmutptr = instrcount.get();
@@ -240,6 +236,9 @@ fn main() {
             if sig == SIGINT {
                 println!("Emulator exiting");
                 println!("Instruction count: {}", instrcount);
+                println!("Time elapsed: {:?}", now.elapsed());
+                let hz = *instrcount as f64 / now.elapsed().as_secs_f64();
+                println!("Instructions per second: {}MHz", hz / 1_000_000.0);
                 std::process::exit(0);
             }
         }
@@ -396,8 +395,14 @@ fn main() {
                 _ => registers.pc += 1
             }
             *instrcount += 1;
-            if *instrcount % (if debug { 1 } else { 100_000 }) == 0 {
-                // break;
+            if *instrcount % (if debug { 1 } else { 3_000_000_000 }) == 0 {
+                println!("Emulator exiting");
+                println!("Instruction count: {}", instrcount);
+                println!("Time elapsed: {:?}", now.elapsed());
+                let hz = *instrcount as f64 / now.elapsed().as_secs_f64();
+                println!("Instructions per second: {}MHz", hz / 1_000_000.0);
+                std::process::exit(0);
+                
                 if debug {
                     println!("Instruction count: {}", instrcount);
                     println!("{:#x} | {full_instr:?} {}", registers.pc, match is_alu {
