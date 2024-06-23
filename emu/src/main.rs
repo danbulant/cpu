@@ -6,6 +6,10 @@ use std::io::Read;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicU64;
+use std::thread;
+use signal_hook::consts::SIGINT;
+use signal_hook::iterator::Signals;
 
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -203,6 +207,7 @@ fn run_event_loop(display: Arc<Mutex<Box<[u32]>>>) {
 }
 
 fn main() {
+    let mut signals = Signals::new([SIGINT]).unwrap();
     println!("emulator init");
     let mut mem = vec![0u32;2usize.pow(24)].into_boxed_slice();
     let display = Arc::new(Mutex::new(vec![0u32;256*256].into_boxed_slice()));
@@ -222,13 +227,25 @@ fn main() {
     for (i, byte) in file.bytes().enumerate() {
         mem[i / 4] = mem[i / 4] << 8 | byte.unwrap() as u32;
     }
+    let instrcount = Arc::new(AtomicU64::new(0));
+
+    let instrcount2 = instrcount.clone();
+    thread::spawn(move || {
+        let instrcount = instrcount2;
+        for sig in signals.forever() {
+            if sig == SIGINT {
+                println!("Emulator exiting");
+                println!("Instruction count: {}", instrcount.load(std::sync::atomic::Ordering::Relaxed));
+                std::process::exit(0);
+            }
+        }
+    });
 
     let display2 = display.clone();
-    let cpu_thread = std::thread::spawn(move || {
+    let cpu_thread = thread::spawn(move || {
         let display = display2;
         println!("starto!");
     
-        let mut instrcount = 0u64;
         let mut jmpto = 0;
         let mut jmpin = 0;
         loop {
@@ -368,11 +385,11 @@ fn main() {
                 },
                 _ => registers.pc += 1
             }
-            instrcount += 1;
-            if instrcount % (if debug { 1 } else { 100_000}) == 0 {
+            let currentinstrcount = instrcount.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if currentinstrcount % (if debug { 1 } else { 100_000}) == 0 {
                 // break;
                 if debug {
-                    println!("Instruction count: {}", instrcount);
+                    println!("Instruction count: {}", currentinstrcount);
                     println!("{:#x} | {full_instr:?} {}", registers.pc, match is_alu {
                         true => if opcode == 0b001100 { // mul
                             format!("{}, {}, {}, {}", reg_to_ascii(r1), reg_to_ascii(r2), reg_to_ascii(r3), reg_to_ascii(r4))
