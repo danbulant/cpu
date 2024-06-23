@@ -1,13 +1,14 @@
 mod winit_app;
 
+use std::cell::UnsafeCell;
 use std::env::args;
 use std::fmt::Debug;
 use std::io::Read;
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicU64;
 use std::thread;
+use std::time::Instant;
+
 use signal_hook::consts::SIGINT;
 use signal_hook::iterator::Signals;
 
@@ -41,10 +42,10 @@ macro_rules! back_to_enum {
         //     }
         // }
 
-        impl std::convert::From<i32> for $name {
-            fn from(v: i32) -> Self {
+        impl std::convert::From<u8> for $name {
+            fn from(v: u8) -> Self {
                 match v {
-                    $(x if x == $name::$vname as i32 => $name::$vname,)*
+                    $(x if x == $name::$vname as u8 => $name::$vname,)*
                     _ => panic!("Invalid instruction"),
                 }
             }
@@ -158,7 +159,7 @@ fn reg_to_ascii(reg: usize) -> char {
     }
 }
 
-fn run_event_loop(display: Arc<Mutex<Box<[u32]>>>) {
+fn run_event_loop(display: Box<[u32]>) {
     let event_loop = EventLoop::new().unwrap();
     let mut app = winit_app::WinitAppBuilder::with_init(|elwt| {
         let window = {
@@ -166,29 +167,24 @@ fn run_event_loop(display: Arc<Mutex<Box<[u32]>>>) {
             Rc::new(window.unwrap())
         };
         let context = softbuffer::Context::new(window.clone()).unwrap();
-        let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+        let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+        
+        surface
+            .resize(
+                NonZeroU32::new(256).unwrap(),
+                NonZeroU32::new(256).unwrap(),
+            )
+            .unwrap();
+        elwt.set_control_flow(ControlFlow::Wait);
 
         (window, surface)
     }).with_event_handler(|state, event, elwt| {
         let (window, surface) = state;
-        elwt.set_control_flow(ControlFlow::Wait);
 
         match event {
             Event::WindowEvent { window_id, event: WindowEvent::RedrawRequested } if window_id == window.id() => {
-                surface
-                    .resize(
-                        NonZeroU32::new(256).unwrap(),
-                        NonZeroU32::new(256).unwrap(),
-                    )
-                    .unwrap();
-
                 let mut buffer = surface.buffer_mut().unwrap();
-                let display = display.lock().unwrap();
-                for (i, pixel) in display.iter().enumerate() {
-                    let x = i >> 8;
-                    let y = i & 0xFF;
-                    buffer[x + (y*256)] = *pixel;
-                }
+                buffer.copy_from_slice(&display);
 
                 buffer.present().unwrap();
                 window.request_redraw();
@@ -210,7 +206,7 @@ fn main() {
     let mut signals = Signals::new([SIGINT]).unwrap();
     println!("emulator init");
     let mut mem = vec![0u32;2usize.pow(24)].into_boxed_slice();
-    let display = Arc::new(Mutex::new(vec![0u32;256*256].into_boxed_slice()));
+    let display = vec![0u32;256*256].into_boxed_slice();
     let mut registers = Registers {
         regs: [0;16],
         pc: 0,
@@ -219,31 +215,44 @@ fn main() {
     };
     let stdin = std::io::stdin();
 
-    let file = args().nth(1).unwrap();
-    let file = std::fs::File::open(file).unwrap();
-    let file = std::io::BufReader::new(file);
+    let filename = args().nth(1).unwrap();
+    let file = std::fs::File::open(filename).unwrap();
+    let mut file = std::io::BufReader::new(file);
     let debug = false;
 
-    for (i, byte) in file.bytes().enumerate() {
-        mem[i / 4] = mem[i / 4] << 8 | byte.unwrap() as u32;
+    let mut i = 0;
+    loop {
+        let mut buf = [0;4];
+        match file.read_exact(&mut buf) {
+            Ok(_) => {},
+            Err(_) => break
+        }
+        mem[i] = u32::from_be_bytes(buf);
+        i += 1;
     }
-    let instrcount = Arc::new(AtomicU64::new(0));
-
-    let instrcount2 = instrcount.clone();
+    
+    let instrcount = UnsafeCell::from(0u64);
+    let instrcountreadptr = instrcount.get();
+    let instrcountmutptr = instrcount.get();
+    let instrcount = unsafe { &*instrcountreadptr };
     thread::spawn(move || {
-        let instrcount = instrcount2;
         for sig in signals.forever() {
             if sig == SIGINT {
                 println!("Emulator exiting");
-                println!("Instruction count: {}", instrcount.load(std::sync::atomic::Ordering::Relaxed));
+                println!("Instruction count: {}", instrcount);
                 std::process::exit(0);
             }
         }
     });
-
-    let display2 = display.clone();
+    
+    let display = Box::into_raw(display);
+    
+    let (display, display2) = unsafe {
+        (Box::from_raw(display), Box::from_raw(display))
+    };
+    let instrcount = unsafe { &mut *instrcountmutptr };
     let cpu_thread = thread::spawn(move || {
-        let display = display2;
+        let mut display = display2;
         println!("starto!");
     
         let mut jmpto = 0;
@@ -252,7 +261,7 @@ fn main() {
             let instr = mem[registers.pc as usize];
             let is_alu = instr & (1 << 31) == 0;
             let is_imm = instr & (1 << 30) != 0;
-            let opcode = (instr >> 26) & 0b1111;
+            let opcode = ((instr >> 26) & 0b1111) as u8;
             let imm = instr & 0xFFFF;
             let r1: usize = instr as usize >> 21 & 0b11111;
             let r2: usize = instr as usize >> 16 & 0b11111;
@@ -261,7 +270,7 @@ fn main() {
             let last_value = if is_imm { imm } else { registers[r3] };
             let full_instr;
             if is_alu {
-                let instr = AluInstruction::from(opcode as i32);
+                let instr = AluInstruction::from(opcode);
                 full_instr = Instruction::Alu(instr);
                 if debug { dbg!(&instr); }
                 let mut cout = 0u32;
@@ -326,7 +335,7 @@ fn main() {
                 let sign = registers[r1] & (1 << 31) != 0;
                 registers.flags = (cout << 3) | (is_zero as u32) | ((sign as u32)<<4);
             } else {
-                let instr = CoreInstruction::from(opcode as i32);
+                let instr = CoreInstruction::from(opcode);
                 full_instr = Instruction::Core(instr);
                 if debug { dbg!(&instr); }
                 match instr {
@@ -367,10 +376,11 @@ fn main() {
                     CoreInstruction::Draw => {
                         let pos = registers[r1] & 0xFFFF;
                         let color = registers[r2] & 0xFFFFFF;
-                        display.lock().unwrap()[pos as usize] = color;
+                        let pos = (pos >> 8) | (pos << 8) & 0xFFFF;
+                        display[pos as usize] = color;
                     },
                     CoreInstruction::DClear => {
-                        display.lock().unwrap().iter_mut().for_each(|x| *x = 0);
+                        display.iter_mut().for_each(|x| *x = 0);
                     }
                 }
             }
@@ -385,11 +395,11 @@ fn main() {
                 },
                 _ => registers.pc += 1
             }
-            let currentinstrcount = instrcount.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if currentinstrcount % (if debug { 1 } else { 100_000}) == 0 {
+            *instrcount += 1;
+            if *instrcount % (if debug { 1 } else { 100_000 }) == 0 {
                 // break;
                 if debug {
-                    println!("Instruction count: {}", currentinstrcount);
+                    println!("Instruction count: {}", instrcount);
                     println!("{:#x} | {full_instr:?} {}", registers.pc, match is_alu {
                         true => if opcode == 0b001100 { // mul
                             format!("{}, {}, {}, {}", reg_to_ascii(r1), reg_to_ascii(r2), reg_to_ascii(r3), reg_to_ascii(r4))
@@ -423,7 +433,7 @@ fn main() {
                     stdin.read_line(&mut line).unwrap();
                     if line == "d\n" {
                         println!();
-                        print_to_stdout(&display.lock().unwrap());
+                        print_to_stdout(&display);
                         println!();
                     }
                 }
