@@ -3,8 +3,19 @@ name = "emu"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = false
+debug = 1
 
+[build]
+rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=mold", "-C", "symbol-mangling-version=v0"]
+#rustflags = ["-C", "target-cpu=native", "-C", "symbol-mangling-version=v0"]
+#rustflags = ["-C", "profile-generate=./target/pgo-profiles"]
+
+[dependencies]
 femtovg = "0.9.1"
 glutin = "0.32.0"
 raw-window-handle = "0.5.0"
