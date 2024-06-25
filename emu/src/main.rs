@@ -1,4 +1,19 @@
+//! # A simple emulator for a custom architecture
+//! 
+//! JIT WIP.
+//! 
+//! ~~R8D-R15D are used as GPRs. As the CPU has 16 registers, they're all saved in memory (pointed to by RSI) and swapped as needed.
+//! R8 always contains rA or rI, R9 rB or rJ and so on.~~
+//! Registers are used directly from memory pointed to by RSI.
+//! EAX is used as scratch register.
+//! EBX is used for CPU flags.
+//! RCX is used as a pointer for the program memory. 
+//! RDX is used in the edge case of reading two registers mapped to the same register (e.g. rA and rI), the second register will be stored here.
+//! This is only used within the instruction itself, but it means that the register value may be changed.
+//! RDI is used as a pointer for display memory (256x256 32-bit pixels).
+
 mod winit_app;
+mod cpu;
 
 use std::cell::UnsafeCell;
 use std::env::args;
@@ -163,7 +178,7 @@ fn run_event_loop(display: Box<[u32]>) {
         };
         let context = softbuffer::Context::new(window.clone()).unwrap();
         let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
-        
+
         surface
             .resize(
                 NonZeroU32::new(256).unwrap(),
@@ -225,7 +240,7 @@ fn main() {
         mem[i] = u32::from_be_bytes(buf);
         i += 1;
     }
-    
+
     let now = std::time::Instant::now();
     let instrcount = UnsafeCell::from(0u64);
     let instrcountreadptr = instrcount.get();
@@ -243,9 +258,9 @@ fn main() {
             }
         }
     });
-    
+
     let display = Box::into_raw(display);
-    
+
     let (display, display2) = unsafe {
         (Box::from_raw(display), Box::from_raw(display))
     };
@@ -253,7 +268,7 @@ fn main() {
     let cpu_thread = thread::spawn(move || {
         let mut display = display2;
         println!("starto!");
-    
+
         let mut jmpto = 0;
         let mut jmpin = 0;
         loop {
@@ -330,8 +345,9 @@ fn main() {
                         registers[r2] = (res >> 32) as u32;
                     }
                 }
-                let is_zero = registers[r1] == 0;
-                let sign = registers[r1] & (1 << 31) != 0;
+                let regptr = &mut registers[r1];
+                let is_zero = *regptr == 0;
+                let sign = *regptr & (1 << 31) != 0;
                 registers.flags = (cout << 3) | (is_zero as u32) | ((sign as u32)<<4);
             } else {
                 let instr = CoreInstruction::from(opcode);
@@ -401,8 +417,8 @@ fn main() {
                 println!("Time elapsed: {:?}", now.elapsed());
                 let hz = *instrcount as f64 / now.elapsed().as_secs_f64();
                 println!("Instructions per second: {}MHz", hz / 1_000_000.0);
-                std::process::exit(0);
-                
+                if !debug { std::process::exit(0); }
+
                 if debug {
                     println!("Instruction count: {}", instrcount);
                     println!("{:#x} | {full_instr:?} {}", registers.pc, match is_alu {
