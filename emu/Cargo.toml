@@ -23,3 +23,4 @@ winit = {  version = "0.30.3" }
 glutin-winit = "0.5.0"
 softbuffer = "0.4.4"
 signal-hook = "0.3.17"
+dynasmrt = "2.0.0"

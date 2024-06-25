@@ -4,16 +4,11 @@
 //! 
 //! ~~R8D-R15D are used as GPRs. As the CPU has 16 registers, they're all saved in memory (pointed to by RSI) and swapped as needed.
 //! R8 always contains rA or rI, R9 rB or rJ and so on.~~
-//! Registers are used directly from memory pointed to by RSI.
-//! EAX is used as scratch register.
-//! EBX is used for CPU flags.
-//! RCX is used as a pointer for the program memory. 
-//! RDX is used in the edge case of reading two registers mapped to the same register (e.g. rA and rI), the second register will be stored here.
-//! This is only used within the instruction itself, but it means that the register value may be changed.
-//! RDI is used as a pointer for display memory (256x256 32-bit pixels).
+//! A and B registers are used as scratch
 
 mod winit_app;
 mod cpu;
+mod registers;
 
 use std::cell::UnsafeCell;
 use std::env::args;
@@ -29,6 +24,7 @@ use signal_hook::iterator::Signals;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
+use crate::registers::{print_to_stdout, reg_to_ascii, Registers};
 
 #[derive(Debug)]
 enum Instruction {
@@ -97,75 +93,6 @@ back_to_enum! {
         Read = 0b1100,
         Draw = 0b1110,
         DClear = 0b1111,
-    }
-}
-
-struct Registers {
-    regs: [u32;16],
-    pc: u32,
-    flags: u32,
-    /// scratch value that's never read from to satisfy rust
-    scratch: u32
-}
-
-impl Debug for Registers {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut x = f.debug_struct("Registers");
-        x
-            .field("pc", &self.pc)
-            .field("flags", &self.flags);
-        for i in 0..16 {
-            // annotate with alphabet
-            let c = (b'A' + i as u8) as char;
-            x.field(&c.to_string(), &format!("{:#} {:#x} {:#b}", self.regs[i], self.regs[i], self.regs[i]));
-        }
-        x.finish()
-    }
-}
-
-impl std::ops::Index<usize> for Registers {
-    type Output = u32;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        match index {
-            0 => &0,
-            0b11110 => &self.pc,
-            0b11111 => &self.flags,
-            index => &self.regs[index - 1]
-        }
-    }
-}
-
-impl std::ops::IndexMut<usize> for Registers {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        match index {
-            0 => &mut self.scratch,
-            index => &mut self.regs[index - 1],
-            x if x & 0b10000 != 0 => &mut self.scratch,
-        }
-    }
-}
-
-fn print_to_stdout(display: &[u32]) {
-    for y in 0..256 {
-        for x in 0..256 {
-            let pixel = display[(x * 256 + y) as usize];
-            let red = pixel >> 16 & 0xFFu32;
-            let green = pixel >> 8 & 0xFFu32;
-            let blue = pixel & 0xFF;
-            print!("\x1b[38;2;{red};{green};{blue}m#", red=red, green=green, blue=blue);
-        }
-        println!();
-    }
-    println!("\x1b[0m");
-}
-
-fn reg_to_ascii(reg: usize) -> char {
-    match reg {
-        0 => '0',
-        0b11110 => 'X',
-        0b11111 => 'Z',
-        reg => (b'A' + reg as u8 - 1) as char
     }
 }
 
