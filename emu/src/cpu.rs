@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::slice;
 use crate::registers::Registers;
 
@@ -9,15 +9,24 @@ pub struct Cpu {
     pub mem: Box<[u32]>,
     pub display: Box<[u32]>,
     registers: Registers,
-    assembled: HashMap<u32, Assembled>
+    assembled: HashMap<u32, Assembled>,
+    jmp_targets: HashSet<u32>
 }
 
+#[derive(Debug)]
 struct Assembled {
     buf: ExecutableBuffer,
-    size: usize,
-    offset: AssemblyOffset 
+    /// number of instructions represented
+    size: u32,
+    /// start offset of the assembly
+    offset: AssemblyOffset,
+    /// last instruction assembled, used for debugging and possibly in the future for jump handling
+    last: InstructionData,
+    /// offsets of jump targets
+    offsets: HashMap<u32, AssemblyOffset>
 }
 
+#[derive(Debug)]
 struct InstructionData {
     instr: Instruction,
     is_imm: bool,
@@ -31,14 +40,24 @@ struct InstructionData {
 impl Cpu {
     pub fn new() -> Cpu {
         Cpu {
-            mem: vec![0; 4096].into_boxed_slice(),
+            mem: vec![0; 2usize.pow(24)].into_boxed_slice(),
             display: vec![0; 64 * 32].into_boxed_slice(),
             registers: Registers::new(),
-            assembled: HashMap::new()
+            assembled: HashMap::new(),
+            jmp_targets: HashSet::new()
         }
     }
     
-    pub fn assemble_offset(&mut self, mut offset: u32) {
+    pub fn start(&mut self) {
+        if !self.assembled.contains_key(&0) {
+            self.assemble_offset(0);
+        }
+        let assembled = self.assembled.get(&0).unwrap();
+        let f: extern "C" fn() -> () = unsafe { std::mem::transmute(assembled.buf.ptr(assembled.offset)) };
+        f();
+    }
+    
+    pub fn assemble_offset(&mut self, start_offset: u32) {
         let mut ops = dynasmrt::x64::Assembler::new().unwrap();
         let selfptr = &self as *const _;
         dynasm!(ops
@@ -48,8 +67,15 @@ impl Cpu {
         let assembly_offset = ops.offset();
         let memm = &mut *self.mem as *mut _ as *mut ();
         let displaym = &mut *self.display as *mut _ as *mut ();
+        let mut offsets = HashMap::new();
+        let mut last_instruction = None;
+        let mut max_instructions = 100;
+        let mut offset = start_offset;
         loop {
             let instr = self.mem[offset as usize];
+            if self.jmp_targets.contains(&offset) {
+                offsets.insert(offset, ops.offset());
+            }
             let is_alu = instr & (1 << 31) == 0;
             let is_imm = instr & (1 << 30) != 0;
             let opcode = ((instr >> 26) & 0b1111) as u8;
@@ -65,6 +91,8 @@ impl Cpu {
             let reg3 = &self.registers[r3] as *const _;
             let reg4 = &self.registers[r4] as *const _;
             let regflags = &mut self.registers.flags as *mut _;
+            max_instructions -= 1;
+            let mut stop = max_instructions == 0;
             let full_instr;
             if is_alu {
                 let instr = AluInstruction::from(opcode);
@@ -324,8 +352,26 @@ impl Cpu {
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
                                 ; jmp rax
                             );
+                        } else {
+                             dynasm!(ops
+                                ; mov rdi, QWORD selfptr as _);
+                            if is_imm {
+                                dynasm!(ops
+                                    ; mov esi, imm as _
+                                );
+                                self.jmp_targets.insert(imm);
+                            } else {
+                                dynasm!(ops
+                                    ; mov esi, [DWORD reg1 as _]
+                                );
+                            }
+                            dynasm!(ops
+                                ; mov rax, QWORD get_address as _
+                                ; call rax
+                                ; jmp rax
+                            );
                         }
-                        // we don't know offset - stop here, save this instr as last instruction, and we'll try to recover it then. 
+                        stop = true;
                     },
                     CoreInstruction::Jz => {
                         // if registers.flags & 1 != 0 {
@@ -333,18 +379,41 @@ impl Cpu {
                         //     jmpto = if is_imm { imm } else { registers[r1] };
                         // }
 
+                        let skip  = ops.new_dynamic_label();
+                        dynasm!(ops
+                            ; mov rbx, [DWORD regflags as _]
+                            ; and rbx, 1 // set real zero flag if zero flag is not set
+                            ; jz =>skip // if zero flag is not set
+                            );
                         if is_imm && (self.assembled.contains_key(&imm)) {
                             let assembled = self.assembled.get(&imm).unwrap();
-                            let skip  = ops.new_dynamic_label();
                             dynasm!(ops
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
-                                ; mov rbx, [DWORD regflags as _]
-                                ; and rbx, 1 // set real zero flag if zero flag is not set
-                                ; jz =>skip // if zero flag is not set
+                            );
+                        } else {
+                            dynasm!(ops
+                                ; mov rdi, QWORD selfptr as _);
+                            if is_imm {
+                                dynasm!(ops
+                                    ; mov esi, imm as _
+                                );
+                                self.jmp_targets.insert(imm);
+                            } else {
+                                dynasm!(ops
+                                    ; mov esi, [DWORD reg1 as _]
+                                );
+                            }
+                            dynasm!(ops
+                                ; mov rax, QWORD get_address as _
+                                ; call rax
                                 ; jmp rax
-                                ; =>skip
                             );
                         }
+                        dynasm!(ops
+                            ; jmp rax
+                            ; =>skip
+                        );
+                        stop = true;
                     },
                     CoreInstruction::Jnz => {
                         // if registers.flags & 1 == 0 {
@@ -352,18 +421,41 @@ impl Cpu {
                         //     jmpto = if is_imm { imm } else { registers[r1] };
                         // }
 
+                        let skip  = ops.new_dynamic_label();
+                        dynasm!(ops
+                            ; mov rbx, [DWORD regflags as _]
+                            ; and rbx, 1 // set real zero flag if zero flag is not set
+                            ; jnz =>skip // if zero flag is not set
+                            );
                         if is_imm && (self.assembled.contains_key(&imm)) {
                             let assembled = self.assembled.get(&imm).unwrap();
-                            let skip  = ops.new_dynamic_label();
                             dynasm!(ops
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
-                                ; mov rbx, [DWORD regflags as _]
-                                ; and rbx, 1 // set real zero flag if zero flag is not set
-                                ; jnz =>skip // if zero flag is not set
+                            );
+                        } else {
+                            dynasm!(ops
+                                ; mov rdi, QWORD selfptr as _);
+                            if is_imm {
+                                dynasm!(ops
+                                    ; mov esi, imm as _
+                                );
+                                self.jmp_targets.insert(imm);
+                            } else {
+                                dynasm!(ops
+                                    ; mov esi, [DWORD reg1 as _]
+                                );
+                            }
+                            dynasm!(ops
+                                ; mov rax, QWORD get_address as _
+                                ; call rax
                                 ; jmp rax
-                                ; =>skip
                             );
                         }
+                        dynasm!(ops
+                            ; jmp rax
+                            ; =>skip
+                        );
+                        stop = true;
                     },
                     CoreInstruction::Read => {
                         // TODO: implement read
@@ -396,11 +488,51 @@ impl Cpu {
                 }
             }
             offset += 1;
+            if stop {
+                last_instruction = Some(InstructionData {
+                    instr: full_instr,
+                    is_imm,
+                    imm,
+                    r1,
+                    r2,
+                    r3,
+                    r4
+                });
+                break;
+            }
+        }
+        dynasm!(ops; ret);
+        let buf = ops.finalize().unwrap();
+        let assembled = Assembled {
+            buf,
+            offset: assembly_offset,
+            offsets,
+            last: last_instruction.unwrap(),
+            size: offset - start_offset
+        };
+        let mut file = std::fs::File::create(format!("assembly/{}.bin", start_offset)).unwrap();
+        use std::io::Write;
+        file.write_all(assembled.buf.as_ref()).unwrap();
+        dbg!(&assembled);
+        self.assembled.insert(start_offset, assembled);
+    }
+}
+
+extern "C" fn get_address(cpu: *mut Cpu, addr: u32) -> usize {
+    println!("jump requested to {:x}", addr);
+    let cpu = unsafe { &mut *cpu };
+    cpu.jmp_targets.insert(addr);
+    match cpu.assembled.get(&addr) {
+        Some(assembled) => assembled.buf.ptr(assembled.offset) as usize,
+        None => {
+            cpu.assemble_offset(addr);
+            let assembled = cpu.assembled.get(&addr).unwrap();
+            assembled.buf.ptr(assembled.offset) as usize
         }
     }
 }
 
-extern "sysv64" fn clear_display(display: *mut u32) {
+extern "C" fn clear_display(display: *mut u32) {
     unsafe {
         slice::from_raw_parts_mut(display, 256*256)
     }.iter_mut().for_each(|x| *x = 0);

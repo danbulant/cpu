@@ -34,8 +34,8 @@ impl Debug for Registers {
     }
 }
 
-pub const REG_FLAGS = 0b11111;
-pub const REG_PC = 0b11110;
+pub const REG_FLAGS: usize = 0b11111;
+pub const REG_PC: usize = 0b11110;
 
 impl std::ops::Index<usize> for Registers {
     type Output = u32;
