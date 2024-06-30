@@ -19,16 +19,19 @@ impl Registers {
     }
 }
 
+const CHARS_STR: [&str; 16] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
+const CHARS: [char; 16] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'];
+
 impl Debug for Registers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut x = f.debug_struct("Registers");
         x
             .field("pc", &self.pc)
             .field("flags", &self.flags);
-        for i in 0..16 {
+        for (i, c) in CHARS_STR.iter().enumerate() {
             // annotate with alphabet
-            let c = (b'A' + i as u8) as char;
-            x.field(&c.to_string(), &format!("{:#} {:#x} {:#b}", self.regs[i], self.regs[i], self.regs[i]));
+            // let c = (b'A' + i as u8) as char;
+            x.field(c, &format!("{:#} {:#x} {:#b}", self.regs[i], self.regs[i], self.regs[i]));
         }
         x.finish()
     }
@@ -42,7 +45,7 @@ impl std::ops::Index<usize> for Registers {
 
     fn index(&self, index: usize) -> &Self::Output {
         match index {
-            0 => &0,
+            0 => &self.scratch,
             REG_PC => &self.pc,
             REG_FLAGS => &self.flags,
             index => &self.regs[index - 1]
@@ -54,8 +57,8 @@ impl std::ops::IndexMut<usize> for Registers {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         match index {
             0 => &mut self.scratch,
-            index => &mut self.regs[index - 1],
             x if x & 0b10000 != 0 => &mut self.scratch,
+            index => &mut self.regs[index - 1],
         }
     }
 }
@@ -79,6 +82,6 @@ pub fn reg_to_ascii(reg: usize) -> char {
         0 => '0',
         REG_PC => 'X',
         REG_FLAGS => 'Z',
-        reg => (b'A' + reg as u8 - 1) as char
+        reg => CHARS[reg - 1]
     }
 }

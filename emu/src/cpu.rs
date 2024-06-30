@@ -37,11 +37,23 @@ struct InstructionData {
     r4: usize
 }
 
+macro_rules! asm {
+    ($ops:ident $($t:tt)*) => {
+        dynasm!($ops
+            ; .arch x64
+            ; .alias reg, r12
+            ; .alias mem, r13
+            ; .alias display, r14
+            $($t)*
+        )
+    }
+}
+
 impl Cpu {
     pub fn new() -> Cpu {
         Cpu {
             mem: vec![0; 2usize.pow(24)].into_boxed_slice(),
-            display: vec![0; 64 * 32].into_boxed_slice(),
+            display: vec![0; 256 * 256].into_boxed_slice(),
             registers: Registers::new(),
             assembled: HashMap::new(),
             jmp_targets: HashSet::new()
@@ -55,22 +67,38 @@ impl Cpu {
         let assembled = self.assembled.get(&0).unwrap();
         let f: extern "C" fn() -> () = unsafe { std::mem::transmute(assembled.buf.ptr(assembled.offset)) };
         f();
+        dbg!(&self.registers);
+        println!("post start");
     }
     
     pub fn assemble_offset(&mut self, start_offset: u32) {
         let mut ops = dynasmrt::x64::Assembler::new().unwrap();
-        let selfptr = &self as *const _;
-        dynasm!(ops
-            ; .arch x64
-            // ; mov 
-        );
-        let assembly_offset = ops.offset();
+        let selfptr = self as *const _;
         let memm = &mut *self.mem as *mut _ as *mut ();
         let displaym = &mut *self.display as *mut _ as *mut ();
+        let regr = &self.registers as *const _;
+        let regm = &mut self.registers as *mut _;
+        let assembly_offset = ops.offset();
+        let reg_pc = unsafe { (&self.registers.pc as *const u32).byte_offset_from::<Registers>(regr) };
+        asm!(ops
+            ; push rbp
+            ; mov rbp, rsp
+            ; push rbx
+            ; push r12
+            ; push r13
+            ; push r14
+            ; mov reg, QWORD regm as _ // set the register pointer
+            ; mov mem, QWORD memm as _ // set the memory pointer
+            ; mov display, QWORD displaym as _ // set the display pointer
+            ; mov r12, QWORD regm as _ // set the register pointer (again for some reason)
+            ; mov eax, DWORD start_offset as _ // set the pc to the start offset
+            ; mov [reg + reg_pc as _], eax
+        );
         let mut offsets = HashMap::new();
         let mut last_instruction = None;
         let mut max_instructions = 100;
         let mut offset = start_offset;
+        let reg_scratch = unsafe { (&self.registers.scratch as *const u32).byte_offset_from::<Registers>(regr) };
         loop {
             let instr = self.mem[offset as usize];
             if self.jmp_targets.contains(&offset) {
@@ -84,123 +112,125 @@ impl Cpu {
             let r2: usize = instr as usize >> 16 & 0b11111;
             let r3: usize = instr as usize >> 11 & 0b11111;
             let r4: usize = instr as usize >> 6 & 0b11111;
-            let reg1m = &mut self.registers[r1] as *mut _;
-            let reg1 = &self.registers[r1] as *const _;
-            let reg2m = &mut self.registers[r2] as *mut _;
-            let reg2 = &self.registers[r2] as *const _;
-            let reg3 = &self.registers[r3] as *const _;
-            let reg4 = &self.registers[r4] as *const _;
-            let regflags = &mut self.registers.flags as *mut _;
+            let reg1 = unsafe { (&self.registers[r1] as *const u32).byte_offset_from::<Registers>(regr) };
+            let reg2 = unsafe { (&self.registers[r2] as *const u32).byte_offset_from::<Registers>(regr) };
+            let reg1m = unsafe { (&mut self.registers[r1] as *mut u32).byte_offset_from::<Registers>(regr) };
+            let reg2m = unsafe { (&mut self.registers[r2] as *mut u32).byte_offset_from::<Registers>(regr) };
+            let reg3 = unsafe { (&self.registers[r3] as *const u32).byte_offset_from::<Registers>(regr) };
+            let reg4 = unsafe { (&self.registers[r4] as *const u32).byte_offset_from::<Registers>(regr) };
+            dbg!(r1,r2,r3,r4,reg1,reg2,reg3,reg4);
+            let regflags = unsafe { (&self.registers.flags as *const u32).byte_offset_from::<Registers>(regr) };
             max_instructions -= 1;
             let mut stop = max_instructions == 0;
             let full_instr;
             if is_alu {
                 let instr = AluInstruction::from(opcode);
                 full_instr = Instruction::Alu(instr);
+                dbg!(&full_instr);
                 match instr {
                     AluInstruction::Not => {
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
                                 ; not eax
-                                ; mov [DWORD reg1m as _], eax
+                                ; mov [reg + reg1m as _], eax
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg2 as _]
+                            asm!(ops
+                                ; mov eax, [reg + reg2 as _]
                                 ; not eax
-                                ; mov [DWORD reg1m as _], eax
+                                ; mov [reg + reg1m as _], eax
                             );
                         }
                     },
                     AluInstruction::Xor => {
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
-                                ; xor eax, [DWORD reg1m as _]
-                                ; mov [DWORD reg1m as _], eax
+                                ; xor eax, [reg + reg2 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg2 as _]
-                                ; xor eax, [DWORD reg1m as _]
-                                ; mov [DWORD reg1m as _], eax
+                            asm!(ops
+                                ; mov eax, [reg + reg2 as _]
+                                ; xor eax, [reg + reg3 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         }
                     },
                     AluInstruction::Or => {
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
-                                ; or eax, [DWORD reg2 as _]
-                                ; mov [DWORD reg1m as _], eax
+                                ; or eax, [reg + reg2 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg2 as _]
-                                ; or eax, [DWORD reg3 as _]
-                                ; mov [DWORD reg1m as _], eax
+                            asm!(ops
+                                ; mov eax, [reg + reg2 as _]
+                                ; or eax, [reg + reg3 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         }
                     },
                     AluInstruction::And => {
                         // registers[r1] = registers[r2] & last_value;
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
-                                ; and eax, [DWORD reg2 as _]
-                                ; mov [DWORD reg1m as _], eax
+                                ; and eax, [reg + reg2 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg2 as _]
-                                ; and eax, [DWORD reg3 as _]
-                                ; mov [DWORD reg1m as _], eax
+                            asm!(ops
+                                ; mov eax, [reg + reg2 as _]
+                                ; and eax, [reg + reg3 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         }
                     },
                     AluInstruction::Shl => {
                         // cout = registers[r2] & (1 << 31);
                         // registers[r1] = registers[r2] << 1;
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; mov ebx, 1 << 31
                             ; and ebx, eax
                             ; shl eax, 1
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Shr => {
                         // cout = registers[r2] & 1;
                         // registers[r1] = registers[r2] >> 1;
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; mov ebx, 1
                             ; and ebx, eax
                             ; shr eax, 1
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Rotl => {
                         // cout = registers[r2] & (1 << 31);
                         // registers[r1] = registers[r2].rotate_left(1);
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; mov ebx, 1 << 31
                             ; and ebx, eax
                             ; rol eax, 1
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Rotr => {
                         // cout = registers[r2] & 1;
                         // registers[r1] = registers[r2].rotate_right(1);
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; mov ebx, 1
                             ; and ebx, eax
                             ; ror eax, 1
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Add => {
@@ -208,18 +238,18 @@ impl Cpu {
                         // registers[r1] = registers[r2].wrapping_add(last_value);
                         // cout = if original > registers[r1] { 1 } else { 0 };
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg3 as _]
+                            asm!(ops
+                                ; mov eax, [reg + reg3 as _]
                             );
                         }
-                        dynasm!(ops
-                                ; add eax, [DWORD reg2 as _]
+                        asm!(ops
+                                ; add eax, [reg + reg2 as _]
                                 ; setc bl
-                                ; mov [DWORD reg1m as _], eax
+                                ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Sub => {
@@ -227,40 +257,40 @@ impl Cpu {
                         // registers[r1] = registers[r2].wrapping_sub(last_value);
                         // cout = if original < registers[r1] { 1 } else { 0 };
                         if is_imm {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
                             );
                         } else {
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg3 as _]
+                            asm!(ops
+                                ; mov eax, [reg + reg3 as _]
                             );
                         }
-                        dynasm!(ops
-                                ; sub eax, [DWORD reg2 as _]
+                        asm!(ops
+                                ; sub eax, [reg + reg2 as _]
                                 ; setc bl
-                                ; mov [DWORD reg1m as _], eax
+                                ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Inc => {
                         // let original = registers[r2];
                         // registers[r1] = registers[r2].wrapping_add(1);
                         // cout = if original > registers[r1] { 1 } else { 0 };
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; inc eax
                             ; setc bl
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Dec => {
                         // let original = registers[r2];
                         // registers[r1] = registers[r2].wrapping_sub(1);
                         // cout = if original < registers[r1] { 1 } else { 0 };
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _]
                             ; dec eax
                             ; setc bl
-                            ; mov [DWORD reg1m as _], eax
+                            ; mov [reg + reg1m as _], eax
                         );
                     },
                     AluInstruction::Mul => {
@@ -269,30 +299,30 @@ impl Cpu {
                         // let res = val1.wrapping_mul(val2);
                         // registers[r1] = res as u32;
                         // registers[r2] = (res >> 32) as u32;
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg3 as _]
-                            ; mov ebx, [DWORD reg4 as _]
+                        asm!(ops
+                            ; mov eax, [reg + reg3 as _]
+                            ; mov ebx, [reg + reg4 as _]
                             ; mul ebx
-                            ; mov [DWORD reg1m as _], eax
-                            ; mov [DWORD reg2m as _], edx
+                            ; mov [reg + reg1m as _], eax
+                            ; mov [reg + reg2m as _], edx
                         );
                     }
                 }
-                dynasm!(ops
+                asm!(ops
                     // set the cout flag
                     ; movzx eax, bl
                     ; shl eax, 3
                     // set the zero flag
-                    ; mov ebx, [DWORD reg1m as _]
+                    ; mov ebx, [reg + reg1 as _]
                     ; test ebx, ebx
                     ; setz bl
                     ; or eax, ebx
                     // set the sign flag
-                    // ; mov ebx, [DWORD reg1m as _]
+                    // ; mov ebx, [reg + reg1 as _]
                     ; and ebx, 1 << 31
                     ; shr ebx, 31 - 4 // shift the sign bit to the 4th bit
                     ; or eax, ebx
-                    ; mov [DWORD regflags as _], eax
+                    ; mov [reg + regflags as _], eax
                 );
                 // let regptr = &mut registers[r1];
                 // let is_zero = *regptr == 0;
@@ -306,40 +336,40 @@ impl Cpu {
                         if is_imm {
                             // movh
                             // registers[r1] = imm << 16;
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov eax, DWORD imm as _
                                 ; shl eax, 16
-                                ; mov [DWORD reg1m as _], eax
+                                ; mov [reg + reg1m as _], eax
                             );
                         } else {
                             // mov
                             // registers[r1] = registers[r2];
-                            dynasm!(ops
-                                ; mov eax, [DWORD reg2 as _]
-                                ; mov [DWORD reg1m as _], eax
+                            asm!(ops
+                                ; mov eax, [reg + reg2 as _]
+                                ; mov [reg + reg1m as _], eax
                             );
                         }
                     },
                     CoreInstruction::Sw => {
                         // mem[registers[r1] as usize] = registers[r2];
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg1 as _] // load reg1
+                        asm!(ops
+                            ; mov eax, [reg + reg1 as _] // load reg1
                             ; and eax, 0xFFFFFF // mem is 24b
                             // ; shl eax, 2 // multiply by 4 (4B = 32b)
                             // ; add rax, mem as _ // get real address
-                            ; mov ebx, [DWORD reg2 as _] // load reg2
-                            ; mov [memm as _ + 4 * rax], ebx // save the value into the address
+                            ; mov ebx, [reg + reg2 as _] // load reg2
+                            ; mov [mem + 4 * rax], ebx // save the value into the address
                         );
                     },
                     CoreInstruction::Lw => {
                         // registers[r1] = mem[registers[r2] as usize];
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg2 as _] // load reg2
+                        asm!(ops
+                            ; mov eax, [reg + reg2 as _] // load reg2
                             ; and eax, 0xFFFFFF // mem is 24b
                             // ; shl eax, 2 // multiply by 4 (4B = 32b)
                             // ; add rax, mem as _ // get real address (mem + reg2)
-                            ; mov rax, [memm as _ + 4 * rax] // load the value at the address
-                            ; mov [DWORD reg1m as _], rax // save the value into reg1
+                            ; mov rax, [mem + 4 * rax] // load the value at the address
+                            ; mov [reg + reg1m as _], rax // save the value into reg1
                         );
                     },
                     CoreInstruction::Jmp => {
@@ -348,24 +378,24 @@ impl Cpu {
                         // we don't technically know our offset yet :( If we need it next run, we'll update it then
                         if is_imm && (self.assembled.contains_key(&imm)) {
                             let assembled = self.assembled.get(&imm).unwrap();
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
                                 ; jmp rax
                             );
                         } else {
-                             dynasm!(ops
+                             asm!(ops
                                 ; mov rdi, QWORD selfptr as _);
                             if is_imm {
-                                dynasm!(ops
+                                asm!(ops
                                     ; mov esi, imm as _
                                 );
                                 self.jmp_targets.insert(imm);
                             } else {
-                                dynasm!(ops
-                                    ; mov esi, [DWORD reg1 as _]
+                                asm!(ops
+                                    ; mov esi, [reg + reg1 as _]
                                 );
                             }
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD get_address as _
                                 ; call rax
                                 ; jmp rax
@@ -380,36 +410,35 @@ impl Cpu {
                         // }
 
                         let skip  = ops.new_dynamic_label();
-                        dynasm!(ops
-                            ; mov rbx, [DWORD regflags as _]
+                        asm!(ops
+                            ; mov rbx, [reg + regflags as _]
                             ; and rbx, 1 // set real zero flag if zero flag is not set
                             ; jz =>skip // if zero flag is not set
                             );
                         if is_imm && (self.assembled.contains_key(&imm)) {
                             let assembled = self.assembled.get(&imm).unwrap();
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
                             );
                         } else {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rdi, QWORD selfptr as _);
                             if is_imm {
-                                dynasm!(ops
+                                asm!(ops
                                     ; mov esi, imm as _
                                 );
                                 self.jmp_targets.insert(imm);
                             } else {
-                                dynasm!(ops
-                                    ; mov esi, [DWORD reg1 as _]
+                                asm!(ops
+                                    ; mov esi, [reg + reg1 as _]
                                 );
                             }
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD get_address as _
                                 ; call rax
-                                ; jmp rax
                             );
                         }
-                        dynasm!(ops
+                        asm!(ops
                             ; jmp rax
                             ; =>skip
                         );
@@ -422,36 +451,36 @@ impl Cpu {
                         // }
 
                         let skip  = ops.new_dynamic_label();
-                        dynasm!(ops
-                            ; mov rbx, [DWORD regflags as _]
+                        asm!(ops
+                            ; mov rbx, [reg + regflags as _]
                             ; and rbx, 1 // set real zero flag if zero flag is not set
                             ; jnz =>skip // if zero flag is not set
                             );
                         if is_imm && (self.assembled.contains_key(&imm)) {
                             let assembled = self.assembled.get(&imm).unwrap();
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD assembled.buf.ptr(assembled.offset) as _
                             );
                         } else {
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rdi, QWORD selfptr as _);
                             if is_imm {
-                                dynasm!(ops
+                                asm!(ops
                                     ; mov esi, imm as _
                                 );
                                 self.jmp_targets.insert(imm);
                             } else {
-                                dynasm!(ops
-                                    ; mov esi, [DWORD reg1 as _]
+                                asm!(ops
+                                    ; mov esi, [reg + reg1 as _]
                                 );
                             }
-                            dynasm!(ops
+                            asm!(ops
                                 ; mov rax, QWORD get_address as _
                                 ; call rax
                                 ; jmp rax
                             );
                         }
-                        dynasm!(ops
+                        asm!(ops
                             ; jmp rax
                             ; =>skip
                         );
@@ -465,28 +494,43 @@ impl Cpu {
                         // let color = registers[r2] & 0xFFFFFF;
                         // let pos = (pos >> 8) | (pos << 8) & 0xFFFF;
                         // display[pos as usize] = color;
-                        dynasm!(ops
-                            ; mov eax, [DWORD reg1 as _] // load reg1
+                        asm!(ops
+                            ; mov eax, [reg + reg1 as _] // load reg1
                             ; and eax, 0xFFFF // mask position
                             ; mov ebx, eax
                             ; shr ebx, 8
                             ; shl eax, 8
                             ; or eax, ebx // swap the bytes
                             ; and eax, 0xFFFF // mask them again, needed both times for proper mask
-                            ; mov ebx, [DWORD reg2 as _] // load reg2
+                            ; mov ebx, [reg + reg2 as _] // load reg2
                             ; and ebx, 0xFFFFFF // mask color
-                            ; mov [displaym as _ + 4 * rax], ebx // save the value into the address
+                            ; mov [display + 4 * rax], ebx // save the value into the address
                         );
                     },
                     CoreInstruction::DClear => {
                         // display.iter_mut().for_each(|x| *x = 0);
-                        dynasm!(ops
+                        asm!(ops
                             ; mov rax, QWORD clear_display as _
                             ; call rax
                         );
                     }
                 }
             }
+            if reg1m == reg_scratch || reg2m == reg_scratch {
+                asm!(ops
+                    ; mov eax, DWORD 0
+                    ; mov [reg + reg_scratch as _], eax // reset scratch pointer (segfault things)
+                );
+            }
+            asm!(ops
+                ; inc [reg + reg_pc as _] // inc PC
+            );
+            // debug call
+            asm!(ops
+                ; mov rdi, QWORD selfptr as _
+                ; mov rax, QWORD debug as _
+                ; call rax
+            );
             offset += 1;
             if stop {
                 last_instruction = Some(InstructionData {
@@ -501,7 +545,14 @@ impl Cpu {
                 break;
             }
         }
-        dynasm!(ops; ret);
+        asm!(ops
+            ; pop r14
+            ; pop r13
+            ; pop r12
+            ; pop rbx
+            ; pop rbp
+            ; ret
+        ); // if we don't jump out, return
         let buf = ops.finalize().unwrap();
         let assembled = Assembled {
             buf,
@@ -514,8 +565,16 @@ impl Cpu {
         use std::io::Write;
         file.write_all(assembled.buf.as_ref()).unwrap();
         dbg!(&assembled);
+        dbg!(memm, displaym, &self.registers as *const _, &self.registers[0] as *const _);
         self.assembled.insert(start_offset, assembled);
     }
+}
+
+extern "C" fn debug(cpu: *mut Cpu) {
+    let cpu = unsafe { &mut *cpu };
+    println!("{:?}", cpu.registers.pc);
+    // dbg!(&cpu.registers);
+    // println!("debug called");
 }
 
 extern "C" fn get_address(cpu: *mut Cpu, addr: u32) -> usize {

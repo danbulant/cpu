@@ -5,6 +5,9 @@
 //! ~~R8D-R15D are used as GPRs. As the CPU has 16 registers, they're all saved in memory (pointed to by RSI) and swapped as needed.
 //! R8 always contains rA or rI, R9 rB or rJ and so on.~~
 //! A and B registers are used as scratch
+//! r12 has a pointer to registers
+//! r13 has a pointer to memory
+//! r14 has a pointer to the display
 
 mod winit_app;
 mod cpu;
@@ -15,6 +18,7 @@ use std::env::args;
 use std::fmt::Debug;
 use std::io::Read;
 use std::num::NonZeroU32;
+use std::process::exit;
 use std::rc::Rc;
 use std::thread;
 
@@ -180,8 +184,10 @@ fn main() {
 
     let display = &cpu.display as &[u32] as *const [u32];
     let cpu_thread = thread::spawn(move || {
-        let mut cpu = cpu;
         cpu.start();
+        println!("Emulator exiting");
+        println!("Time elapsed: {:?}", now.elapsed());
+        exit(0);
     });
     
     run_event_loop(unsafe { &*display });
