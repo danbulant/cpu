@@ -31,7 +31,7 @@ impl Debug for Registers {
         for (i, c) in CHARS_STR.iter().enumerate() {
             // annotate with alphabet
             // let c = (b'A' + i as u8) as char;
-            x.field(c, &format!("{:#} {:#x} {:#b}", self.regs[i], self.regs[i], self.regs[i]));
+            x.field(c, &format!("{:>12} {:>8x} {:#034b}", self.regs[i], self.regs[i], self.regs[i]));
         }
         x.finish()
     }

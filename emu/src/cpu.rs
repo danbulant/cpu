@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::stdin;
 use std::slice;
 use crate::registers::{print_to_stdout, Registers};
 
@@ -67,17 +68,22 @@ impl Cpu {
     pub fn start(&mut self) {
         let mut offset = 0;
         let mut max_loops = 3;
+        let io = stdin();
         loop {
+            // println!("progressing");
             if !self.assembled.contains_key(&offset) {
+                println!("assembling due to progressing");
                 self.assemble_offset(offset);
             }
             let assembled = self.assembled.get(&offset).unwrap();
             let f: extern "C" fn() -> () = unsafe { std::mem::transmute(assembled.buf.ptr(assembled.offset)) };
             f();
-            // println!("progressing");
             // dbg!(offset, assembled.size);
             // dbg!(&self.registers);
             max_loops -= 1;
+            // wait for line
+            // let mut line = String::new();
+            // io.read_line(&mut line).unwrap();
             // if max_loops == 0 {
             //     break;
             // }
@@ -119,7 +125,7 @@ impl Cpu {
             if self.jmp_targets.contains(&offset) {
                 offsets.insert(offset, ops.offset());
                 asm!(ops
-                    ; mov eax, DWORD start_offset as _ // set the pc to the start offset
+                    ; mov eax, DWORD offset as _ // set the pc to the start offset
                     ; mov [reg + reg_pc as _], eax
                 );
             }
@@ -516,6 +522,13 @@ impl Cpu {
                         // let pos = (pos >> 8) | (pos << 8) & 0xFFFF;
                         // display[pos as usize] = color;
                         asm!(ops
+                            // implemented either as function or as inline assembly
+                            // ; mov edx, [reg + reg2 as _]
+                            // ; mov esi, [reg + reg1 as _]
+                            // ; mov rdi, QWORD selfptr as _
+                            // ; mov rax, QWORD draw as _
+                            // ; call rax
+                            
                             ; mov eax, [reg + reg1 as _] // load reg1
                             ; and eax, 0xFFFF // mask position
                             ; mov ebx, eax
@@ -586,10 +599,18 @@ impl Cpu {
         let mut file = std::fs::File::create(format!("assembly/{}.bin", start_offset)).unwrap();
         use std::io::Write;
         file.write_all(assembled.buf.as_ref()).unwrap();
-        dbg!(&assembled);
+        // dbg!(&assembled);
         dbg!(memm, displaym, &self.registers as *const _, &self.registers[0] as *const _);
         self.assembled.insert(start_offset, assembled);
     }
+}
+
+extern "C" fn draw(cpu: *mut Cpu, pos: u32, val: u32) {
+    let cpu = unsafe { &mut *cpu };
+    // dbg!(pos, val);
+    let pos = ((pos >> 8) | (pos << 8)) & 0xFFFF;
+    let val = val & 0xFFFFFF;
+    cpu.display[pos as usize] = val;
 }
 
 extern "C" fn debug(cpu: *mut Cpu) {
